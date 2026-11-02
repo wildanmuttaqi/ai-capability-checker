@@ -149,11 +149,12 @@ pub fn detect() -> Value {
         }
     }
     #[cfg(windows)]
-    if gpu.is_empty() {
-        if let Ok(o) = std::process::Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion | ConvertTo-Json -Compress"]).output() {
-            if let Ok(v) = serde_json::from_slice::<Value>(&o.stdout) {
-                let rows = v.as_array().cloned().unwrap_or_else(||vec![v]);
-                for r in rows { gpu.push(json!({"name":r["Name"],"driver":r["DriverVersion"],"vram_bytes":null})); }
+    let devices = windows_devices();
+    #[cfg(windows)]
+    if let Some(rows) = devices["gpu"].as_array() {
+        for row in rows {
+            if !gpu.iter().any(|g| g["name"] == row["name"]) {
+                gpu.push(row.clone());
             }
         }
     }
@@ -162,10 +163,24 @@ pub fn detect() -> Value {
         .into_iter()
         .flatten()
         .flatten()
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .map(|entry| {
+            let driver = fs::read_link(entry.path().join("device/driver"))
+                .ok()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+            format!(
+                "{}{}",
+                entry.file_name().to_string_lossy(),
+                driver.map(|d| format!(" ({d})")).unwrap_or_default()
+            )
+        })
         .collect();
-    #[cfg(not(target_os = "linux"))]
-    let npu = Vec::<String>::new();
+    #[cfg(windows)]
+    let npu: Vec<String> = devices["npu"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r.as_str().map(str::to_owned))
+        .collect();
     let temp = std::env::temp_dir();
     let disks = Disks::new_with_refreshed_list();
     let free = disks
@@ -176,8 +191,42 @@ pub fn detect() -> Value {
     json!({"cpu":cpu.map(|c|c.brand()),"vendor":cpu.map(|c|c.vendor_id()),"cores":s.physical_core_count(),
         "threads":s.cpus().len(),"frequency_mhz":cpu.map(|c|c.frequency()),"architecture":std::env::consts::ARCH,
         "os":System::long_os_version(),"ram_total_bytes":s.total_memory(),"ram_available_bytes":s.available_memory(),
-        "gpu":gpu,"npu":npu,"tops":null,"temp_dir":temp,"free_storage_bytes":free,
+        "gpu":gpu,"npu":npu,"npu_status":if npu.is_empty(){"Tidak terdeteksi; perangkat mungkin tidak tersedia atau driver belum mengeksposnya"}else{"Terdeteksi oleh OS; dukungan benchmark belum diverifikasi"},"tops":null,"temp_dir":temp,"free_storage_bytes":free,
         "notes":["TOPS unknown: no reliable OS measurement. NPU discovery does not imply llama.cpp support.","GPU enumeration is best-effort; backend availability is verified by running the engine."]})
+}
+
+#[cfg(windows)]
+fn windows_devices() -> Value {
+    // ponytail: driver registry memory is informational, not a GPU allocation budget; use DXGI for budget/usage telemetry.
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$cards = @(Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Video\*\0000' -ErrorAction SilentlyContinue)
+$gpu = @(Get-CimInstance Win32_VideoController | ForEach-Object {
+    $controller = $_
+    $card = $cards | Where-Object { $_.DriverDesc -eq $controller.Name -and $_.'HardwareInformation.qwMemorySize' -is [ValueType] } | Select-Object -First 1
+    $memory = $null
+    $source = 'Unavailable; integrated GPUs may use shared RAM'
+    if ($null -ne $card -and [UInt64]$card.'HardwareInformation.qwMemorySize' -gt 0) {
+        $memory = [UInt64]$card.'HardwareInformation.qwMemorySize'
+        $source = 'Driver registry qwMemorySize; not available VRAM or shared RAM budget'
+    }
+    # Win32_VideoController.AdapterRAM is UInt32 and can truncate at 4 GiB; do not use it as a fallback.
+    @{name=$controller.Name;driver=$controller.DriverVersion;vram_bytes=$memory;vram_source=$source}
+})
+$npu = @(Get-CimInstance Win32_PnPEntity | Where-Object {
+    $_.Present -ne $false -and $_.ConfigManagerErrorCode -eq 0 -and
+    ($_.PNPClass -eq 'NeuralProcessor' -or $_.Name -match '(?i)\bNPU\b|Neural Processing|Neural Processor|Intel\(R\) AI Boost|AMD.*IPU|Qualcomm.*Hexagon')
+} | ForEach-Object { $_.Name } | Sort-Object -Unique)
+@{gpu=$gpu;npu=$npu} | ConvertTo-Json -Depth 4 -Compress
+"#;
+    std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| serde_json::from_slice(&o.stdout).ok())
+        .unwrap_or(Value::Null)
 }
 
 pub fn latest(root: &Path) -> Result<Value> {
