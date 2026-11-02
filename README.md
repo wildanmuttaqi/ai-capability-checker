@@ -42,6 +42,8 @@ Salin folder `linux/` dan/atau `windows/`, `engine/`, `models/` beserta lisensi,
 
 ## Metodologi yang benar-benar diimplementasikan
 
+Model disalin sekali ke cache OS TEMP `ai-checker-model-cache-v1` (Windows: `%TEMP%\ai-checker-model-cache-v1`) dengan nama SHA-256 model. Benchmark ulang memverifikasi hash dari disk lokal lalu melewati penyalinan dari flashdisk. Cache rusak disalin ulang; salinan parsial tidak dipakai. UI menampilkan progres penyalinan dan tahap persiapan/engine/analisis/report. Cache memakai sekitar 2,5 GB per versi model dan tetap ada setelah aplikasi ditutup; hapus folder cache ketika aplikasi tidak berjalan untuk membersihkan ruang. OS dapat membersihkan TEMP sehingga penyalinan perlu diulang. `model_preparation_seconds` terpisah dari waktu engine dan tok/s. Cache mempercepat persiapan, bukan menjamin komputasi benchmark lebih cepat. Engine belum mengekspos tahap internal terstruktur; tidak ada persentase benchmark palsu.
+
 - llama-bench synthetic token workload: prompt 512, generation 128, prefilled KV depth 4096, 3 pengulangan, warmup bawaan engine aktif. Ini **bukan prompt teks chat** dan depth bukan batas context chat.
 - Tok/s dan sampel berasal dari JSON engine, identitas commit dan workload divalidasi. Hash model dicek setiap benchmark. Waktu hashing/loading tidak masuk tok/s.
 - Total proses dicatat; **load time, TTFT, peak RAM/VRAM belum diukur** dan tetap `null`/Unknown. Backend yang dikompilasi tidak otomatis membuktikan GPU offload; label dan engine log menjelaskan ketidakpastian.

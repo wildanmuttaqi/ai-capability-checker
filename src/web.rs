@@ -84,7 +84,13 @@ pub fn serve(root: PathBuf, port: u16) -> Result<()> {
                 let job = Arc::clone(&job);
                 let root = root.clone();
                 std::thread::spawn(move || {
-                    let result = std::panic::catch_unwind(|| benchmark::run(&root, false));
+                    let result = std::panic::catch_unwind(|| {
+                        benchmark::run_with_progress(&root, false, &|message| {
+                            if let Ok(mut state) = job.lock() {
+                                *state = json!({"state":"running","message":message});
+                            }
+                        })
+                    });
                     if let Ok(mut state) = job.lock() {
                         *state = match result {
                             Ok(Ok(_)) => json!({"state":"done","message":"Benchmark complete"}),
