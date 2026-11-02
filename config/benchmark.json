@@ -1,0 +1,18 @@
+{
+  "model_name": "Qwen3-4B",
+  "model_family": "qwen3",
+  "parameters_b": 4.0,
+  "quantization": "Q4_K_M",
+  "model_path": "models/Qwen3-4B-Q4_K_M.gguf",
+  "model_sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+  "model_revision": "bc640142c66e1fdd12af0bd68f40445458f3869b",
+  "model_url": "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/bc640142c66e1fdd12af0bd68f40445458f3869b/Qwen3-4B-Q4_K_M.gguf",
+  "license": "Apache-2.0",
+  "engine_path": "engine/llama.cpp/{platform}/llama-bench{exe}",
+  "prompt_tokens": 512,
+  "generation_tokens": 128,
+  "context_depth": 4096,
+  "runs": 3,
+  "threads": 0,
+  "gpu_layers": 99
+}

@@ -1,0 +1,26 @@
+name: Native checks
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  check:
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo build --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai-checker-${{ matrix.os }}-application-only
+          path: |
+            target/release/ai-checker
+            target/release/ai-checker.exe
+            config/
+            README.md
+            scripts/

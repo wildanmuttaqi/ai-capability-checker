@@ -1,0 +1,61 @@
+{
+ "exllamav2_discussions": {
+  "name": "ExLlamaV2 GitHub Discussions (community benchmark threads)",
+  "note": "Hand-curated measured reports from ExLlamaV2 GitHub discussions. Quotes are verbatim excerpts from the discussion title or body (markdown symbols stripped).",
+  "retrieved": "2026-09-27",
+  "url": "https://github.com/turboderp-org/exllamav2/discussions"
+ },
+ "github_discussions": "github discussions",
+ "github_issues": {
+  "name": "GitHub issue reports + HF model cards (llama.cpp, ExLlamaV2, vLLM)",
+  "note": "Hand-curated community reports from GitHub issues and Hugging Face model cards; quotes are verbatim excerpts (markdown symbols stripped) from the issue body or title, or from the model card page.",
+  "retrieved": "2026-09-27",
+  "url": "https://github.com/ggml-org/llama.cpp"
+ },
+ "hardwarecorner": {
+  "license": "not stated; used with per-row attribution (source_url on each row)",
+  "name": "Hardware Corner GPU LLM benchmarks (per-row attribution)",
+  "note": "hub pages: prompt processing and token generation t/s per context column (4k-256k, k=1024); model + quant as labeled in the row; runtime llama.cpp per the site's benchmark methodology; dashes in the source are not records",
+  "retrieved": "2026-10-03",
+  "url": "https://www.hardware-corner.net/gpu-llm-benchmarks/"
+ },
+ "llamacpp_discussions": {
+  "name": "llama.cpp GitHub Discussions performance threads",
+  "note": "Primary-source llama-bench posts from the official per-backend performance threads (#4167 Apple Silicon, #15013 CUDA, #15021 ROCm, #10879 Vulkan, #23313 SYCL). Hardware is taken from the post text; rows without a detectable chip are skipped.",
+  "retrieved": "2026-09-27",
+  "url": "https://github.com/ggml-org/llama.cpp/discussions"
+ },
+ "llmcheck": {
+  "dataset_version": "2026-09-23",
+  "license": "CC BY 4.0",
+  "name": "LLMCheck Apple Silicon LLM Benchmark Database (CC BY 4.0)",
+  "note": "Rows are estimates (244), sourced (9), or community (5) per the source's own provenance field.",
+  "retrieved": "2026-10-03",
+  "url": "https://llmcheck.net/data/benchmarks.json"
+ },
+ "llmconfigurator": {
+  "generated_at": "2026-09-08T15:39:01.768Z",
+  "license": "CC BY 4.0 (self-declared in file)",
+  "name": "LLM Configurator measured benchmarks (CC BY 4.0)",
+  "note": "curated-public rows are compiled from third-party published benchmarks (publisher + sourceUrl per row); community-submitted rows carry reviewedAt.",
+  "retrieved": "2026-10-03",
+  "url": "https://llmconfigurator.com/measured-benchmarks.json"
+ },
+ "llmconfigurator-estimates": {
+  "generated_at": "2026-08-17",
+  "license": "CC BY 4.0 (self-declared in file)",
+  "name": "LLM Configurator benchmark cells (CC BY 4.0)",
+  "note": "bandwidth-model estimate cells: 5 reference models x 70 accelerators at Q4_K_M / 4096 ctx; per-architecture calibration state in each row's notes; power is board-spec, not measured; hardware names strip a leading vendor token to match other sources",
+  "retrieved": "2026-10-03",
+  "url": "https://llmconfigurator.com/benchmarks.json"
+ },
+ "omlx_traces": {},
+ "qsl17221": "qiulang/vllm-sglang-perf (community benchmark, via vLLM discussion #17221)",
+ "siliconscore": {
+  "license": "not stated; used with per-row attribution (source_url on each row)",
+  "name": "Silicon Score benchmark audit",
+  "note": "Apple Silicon rows; runtime is llamafile/MLX/Ollama/llama.cpp/LM Studio; rows carry prompt eval and TTFT where published.",
+  "retrieved": "2026-10-03",
+  "url": "https://siliconscore.com/benchmarks.json"
+ }
+}

@@ -1,0 +1,9 @@
+/target/
+/models/*.gguf
+/models/*.part
+/engine/
+/results/
+/dataset/*.db*
+/linux/
+/windows/
+/dist/

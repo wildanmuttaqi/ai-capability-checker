@@ -1,0 +1,37 @@
+name: Windows portable USB
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check Rust
+        run: |
+          cargo fmt --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --locked --all-targets -- -D warnings
+          exit $LASTEXITCODE
+      - name: Build engine, download verified model, package USB
+        shell: pwsh
+        run: ./scripts/prepare.ps1 -Backend cpu -Package
+      - name: Upload complete offline Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: AI-CHECKER-Windows-CPU
+          path: |
+            dist/AI-CHECKER-Windows-cpu.zip
+            dist/AI-CHECKER-Windows-cpu.zip.sha256
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
