@@ -34,6 +34,8 @@ enum Commands {
         cpu: bool,
     },
     Report,
+    /// Recompute recommendations using the latest report's original hardware and 4B measurement.
+    Recommend,
     Export {
         #[arg(long, default_value = "json", value_parser = ["json", "csv", "html", "txt"])]
         format: String,
@@ -195,6 +197,25 @@ pub fn stamp() -> u128 {
         .as_millis()
 }
 
+pub fn reanalyze(root: &Path) -> Result<Value> {
+    let mut report = latest(root)?;
+    let c: Config = serde_json::from_value(report["model"].clone())?;
+    if c.parameters_b != 4.0 || c.quantization != "Q4_K_M" {
+        bail!("Reanalysis requires a recorded 4B Q4_K_M benchmark");
+    }
+    let db = dataset::open(root)?;
+    report["recommendation"] =
+        dataset::recommend(&db, &c, &report["hardware"], &report["benchmark"])?;
+    report["derived_from_report"] = report["id"].clone();
+    report["id"] = json!(stamp().to_string());
+    report["report_type"] =
+        json!("recommendation refresh; original benchmark and hardware snapshot retained");
+    let text = serde_json::to_string_pretty(&report)?;
+    // SQLite remains the source of truth; original reports are never replaced.
+    db.execute("INSERT INTO reports(json) VALUES (?1)", [&text])?;
+    Ok(report)
+}
+
 pub fn export(report: &Value, format: &str) -> Result<(String, &'static str)> {
     let text = serde_json::to_string_pretty(report)?;
     Ok(match format {
@@ -238,6 +259,7 @@ fn main() -> Result<()> {
             );
         }
         Commands::Report => println!("{}", serde_json::to_string_pretty(&latest(&root)?)?),
+        Commands::Recommend => println!("{}", serde_json::to_string_pretty(&reanalyze(&root)?)?),
         Commands::Export { format } => print!("{}", export(&latest(&root)?, &format)?.0),
         Commands::DatasetImport { file } => println!(
             "Imported {} measured records",

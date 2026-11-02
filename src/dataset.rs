@@ -169,6 +169,21 @@ fn import_atlas(root: &Path, input: &Value) -> Result<usize> {
     Ok(rows.len())
 }
 
+fn qwen_size(model: &str) -> Option<u32> {
+    let name = model.to_ascii_lowercase();
+    let rest = name
+        .strip_prefix("qwen3-")
+        .or_else(|| name.strip_prefix("qwen3 "))?;
+    let (size, suffix) = rest.split_once('b')?;
+    if !suffix.is_empty() && !suffix.starts_with(['-', ' ']) {
+        return None;
+    }
+    if suffix.contains("-a") {
+        return None;
+    }
+    size.parse().ok()
+}
+
 fn atlas_reference(db: &Connection, c: &Config) -> Result<Value> {
     let total: u64 = db.query_row("SELECT COUNT(*) FROM atlas", [], |r| r.get(0))?;
     let mut stmt=db.prepare("SELECT json FROM atlas WHERE lower(json_extract(json,'$.model')) LIKE ?1 AND json_extract(json,'$.quant')=?2 ORDER BY id")?;
@@ -183,7 +198,8 @@ fn atlas_reference(db: &Connection, c: &Config) -> Result<Value> {
     let mut matching = 0;
     for row in candidates {
         let r: Value = serde_json::from_str(&row?)?;
-        if !r["flags"].as_array().is_some_and(|f| f.is_empty())
+        if qwen_size(r["model"].as_str().unwrap_or("")) != Some(4)
+            || !r["flags"].as_array().is_some_and(|f| f.is_empty())
             || !atlas_number(&r["tps"]).is_some_and(|n| n > 0.0)
         {
             continue;
@@ -197,6 +213,58 @@ fn atlas_reference(db: &Connection, c: &Config) -> Result<Value> {
         json!({"total_records":total,"same_family_quant_records":matching,"examples":examples,
         "usage":"External measured reference only, not comparable local predictions. Hardware, build, model hash and workload may differ; missing metadata remains unknown."}),
     )
+}
+
+fn atlas_cpu(r: &Value) -> bool {
+    matches!(r["backend"].as_str(), Some("CPU" | "llama.cpp (CPU)"))
+}
+
+fn atlas_workload(r: &Value, c: &Config) -> bool {
+    [
+        ("ctx", c.context_depth),
+        ("pp_tokens", c.prompt_tokens),
+        ("tg_tokens", c.generation_tokens),
+    ]
+    .iter()
+    .all(|(key, expected)| r[*key].is_null() || atlas_number(&r[*key]) == Some(*expected as f64))
+        && (r["batch"].is_null() || atlas_number(&r["batch"]) == Some(1.0))
+}
+
+fn atlas_pairs(a: &Value, b: &Value) -> bool {
+    ["source_url", "hardware", "backend", "quant"]
+        .iter()
+        .all(|k| a[*k] == b[*k])
+        && [
+            "ctx",
+            "pp_tokens",
+            "tg_tokens",
+            "batch",
+            "threads",
+            "engine_commit",
+            "settings",
+        ]
+        .iter()
+        .all(|k| a[*k] == b[*k])
+}
+
+fn memory_candidate(size: u32, c: &Config, hardware: &Value, backend: &str) -> Value {
+    // ponytail: dense Q4_K_M planning envelope, not model-specific KV measurement; inspect GGUF architecture for tighter estimates.
+    let gib = 1_073_741_824.0;
+    let weights = size as f64 * 0.70;
+    let kv = 4.0 * (c.context_depth + c.prompt_tokens + c.generation_tokens) as f64 / 4096.0;
+    let required = ((weights + kv + 2.0) * gib).ceil() as u64;
+    let available = hardware["ram_available_bytes"].as_u64();
+    let status = if backend != "CPU" {
+        "unknown"
+    } else {
+        match available {
+            Some(n) if n >= required => "candidate",
+            Some(_) => "memory pressure",
+            None => "unknown",
+        }
+    };
+    json!({"status":status,"estimated_required_bytes":required,"available_bytes":available,
+        "basis":"Estimated dense Q4_K_M weights (0.70 GiB/B) + KV reserve (4 GiB per 4096 tokens) + 2 GiB overhead. Available RAM snapshot only; not guaranteed fit. GPU/shared memory is not added; non-CPU placement unknown."})
 }
 
 fn rating(tps: f64) -> &'static str {
@@ -257,8 +325,30 @@ pub fn recommend(
             .or_default()
             .push(r.generation_tps);
     }
+    let mut atlas_stmt =
+        db.prepare("SELECT json FROM atlas WHERE json_extract(json,'$.quant')='Q4_K_M'")?;
+    let atlas: Vec<Value> = atlas_stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .map(|r| Ok(serde_json::from_str(&r?)?))
+        .collect::<Result<_>>()?;
+    let eligible = |r: &&Value| {
+        backend == "CPU"
+            && atlas_cpu(r)
+            && atlas_workload(r, c)
+            && r["flags"].as_array().is_some_and(|f| f.is_empty())
+            && atlas_number(&r["tps"]).is_some_and(|n| n > 0.0)
+    };
+    let atlas: Vec<_> = atlas.iter().filter(eligible).collect();
+    let atlas_anchors: Vec<_> = atlas
+        .iter()
+        .filter(|r| {
+            qwen_size(r["model"].as_str().unwrap_or("")) == Some(4)
+                && atlas_number(&r["tps"])
+                    .is_some_and(|n| tps > 0.0 && (n / tps - 1.0).abs() <= 0.20)
+        })
+        .collect();
     let mut models = vec![
-        json!({"parameters_b":4,"rating":rating(tps),"measured_tps":tps,"samples":c.runs,"evidence":"direct local measurement"}),
+        json!({"parameters_b":4,"rating":rating(tps),"measured_tps":tps,"samples":c.runs,"confidence":"high","evidence":"direct local measurement","memory":memory_candidate(4,c,hardware,backend)}),
     ];
     let mut min_support = usize::MAX;
     for size in [7u32, 8, 12, 14] {
@@ -280,8 +370,31 @@ pub fn recommend(
         } else {
             Some(values[n / 2])
         };
+        let references: Vec<_> = atlas.iter().filter_map(|r| {
+            if qwen_size(r["model"].as_str().unwrap_or("")) != Some(size) { return None; }
+            let anchor = atlas_anchors.iter().find(|a| atlas_pairs(a, r));
+            let direct = r["hardware"].as_str().is_some_and(|h| hardware["cpu"].as_str().is_some_and(|cpu| h.eq_ignore_ascii_case(cpu)));
+            if anchor.is_none() && !direct { return None; }
+            Some(json!({"record_id":r["id"],"source_url":r["source_url"],"hardware":r["hardware"],
+                "model":r["model"],"tps":atlas_number(&r["tps"]),"anchor_id":anchor.map(|a| &a["id"]),
+                "tier":if anchor.is_some(){"source/hardware pair"}else{"exact CPU label"},
+                "limitations":["Hardware label is not a unique machine identity; source records may share a machine.",
+                    "Context field semantics, threads, model hashes, engine builds and other settings may be unknown. External reference, not predicted local speed."]}))
+        }).collect();
+        let mut speeds: Vec<f64> = references
+            .iter()
+            .filter_map(|r| r["tps"].as_f64())
+            .collect();
+        speeds.sort_by(f64::total_cmp);
+        let range = speeds
+            .first()
+            .zip(speeds.last())
+            .map(|(min, max)| json!({"min":min,"max":max}));
         models.push(json!({"parameters_b":size,"rating":median.map(rating).unwrap_or("Insufficient data"),
-            "measured_tps":median,"samples":n,"evidence":"paired measurements on comparable machines; not a local measurement"}));
+            "measured_tps":median,"samples":n,"evidence_count":n+references.len(),
+            "confidence":if n>=20 {"high"}else if n>=5 {"medium"}else{"low"},
+            "reference_tps_range":range,"references":references,"memory":memory_candidate(size,c,hardware,backend),
+            "evidence":if median.is_some(){"strict paired measurements; not local"}else if speeds.is_empty(){"memory only; insufficient comparable speed evidence"}else{"Atlas measured reference; local speed unknown"}}));
     }
     // ponytail: exact workload/engine matching only; add validated normalization when a curated dataset supports it.
     let confidence = if min_support >= 20 {
@@ -296,7 +409,8 @@ pub fn recommend(
         json!({"confidence":confidence,"comparable_benchmarks":machines.len(),"models":models,
         "external_reference":external_reference,
         "notes":["No TOPS-based or linear parameter extrapolation. No comparable measurements means insufficient data, not a negative recommendation.",
-        "Comparable: exact model hash for 4B anchor, family, quantization, backend, engine commit and workload; throughput ±20%, RAM ±25%. Larger sizes require paired machine IDs.",
+        "Strict evidence: exact 4B hash, family/quant/backend/build/workload; anchor throughput ±20%, RAM ±25%. Atlas CPU evidence requires explicit CPU backend, Q4_K_M, Qwen3 names, compatible known workload; paired source/hardware/backend/settings or exact CPU label. Unknown metadata caps Atlas confidence at low. No GPU/Apple throughput substitution for CPU.",
+        "Memory candidates are planning estimates, not speed ratings or guaranteed fit. Insufficient speed evidence is not a negative recommendation. Memory uses available RAM in the recorded hardware snapshot, never RAM + shared VRAM.",
         "Confidence uses independent machine counts for every target size. Ratings describe measured speed (30/15/5 tok/s), not guaranteed memory fit or model quality."]}),
     )
 }
@@ -304,6 +418,31 @@ pub fn recommend(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_and_atlas_filters_do_not_invent_speed() {
+        let c: Config = serde_json::from_str(include_str!("../config/benchmark.json")).unwrap();
+        let h = json!({"ram_available_bytes":14u64*1_073_741_824});
+        assert_eq!(memory_candidate(7, &c, &h, "CPU")["status"], "candidate");
+        assert_eq!(
+            memory_candidate(14, &c, &h, "CPU")["status"],
+            "memory pressure"
+        );
+        assert_eq!(memory_candidate(7, &c, &h, "CUDA")["status"], "unknown");
+        assert_eq!(qwen_size("Qwen3-8B"), Some(8));
+        assert_eq!(qwen_size("Qwen3.8-Flash-Next"), None);
+        let a = json!({"source_url":"https://example.org/run","hardware":"CPU A","backend":"llama.cpp (CPU)","quant":"Q4_K_M"});
+        assert!(atlas_cpu(&a));
+        assert!(atlas_workload(&a, &c));
+        assert!(atlas_pairs(&a, &a));
+        let mut b = a.clone();
+        b["backend"] = json!("CUDA");
+        assert!(!atlas_cpu(&b));
+        assert!(!atlas_pairs(&a, &b));
+        b = a.clone();
+        b["ctx"] = json!(512);
+        assert!(!atlas_workload(&b, &c));
+    }
 
     #[test]
     fn atlas_import_preserves_provenance_and_rejects_estimates() {

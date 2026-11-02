@@ -1,4 +1,4 @@
-use crate::{benchmark, dataset, detect, export, latest, Config};
+use crate::{benchmark, dataset, detect, export, latest, reanalyze, Config};
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::{
@@ -65,6 +65,14 @@ pub fn serve(root: PathBuf, port: u16) -> Result<()> {
             (&Method::Post, "/api/detect") => {
                 hardware = detect();
                 Ok((hardware.to_string(), "application/json"))
+            }
+            (&Method::Post, "/api/recommend") => {
+                if job.lock().map_err(|_| anyhow!("Job lock poisoned"))?["state"] == "running"
+                    || root.join("results/benchmark.lock").exists()
+                {
+                    return Err(anyhow!("Benchmark already running"));
+                }
+                Ok((reanalyze(&root)?.to_string(), "application/json"))
             }
             (&Method::Post, "/api/benchmark") => {
                 let mut state = job.lock().map_err(|_| anyhow!("Job lock poisoned"))?;
