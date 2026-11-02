@@ -24,6 +24,12 @@ Windows memakai `windows/ai-checker.exe` dengan argumen sama. Tidak perlu root/a
 
 ## USB portable
 
+### Launcher Linux
+
+Sertakan `START-LINUX.sh` di folder utama flashdisk. Klik-ganda lalu pilih **Run / Run in Terminal** bila file manager menawarkan pilihan tersebut. Launcher membuka browser lokal pada port 8798 dan menjalankan aplikasi tanpa mengetik argumen. Jika browser terbuka sebelum server siap, refresh halaman. Tutup dengan Ctrl+C pada terminal aplikasi.
+
+Script prepare memberi izin executable pada launcher. Jika izin hilang setelah penyalinan, aktifkan **Properties → Permissions → Allow executing file as program**. Sebagian file manager membuka `.sh` sebagai teks atau tidak mendukung menjalankan script lewat klik-ganda; gunakan menu **Run as a Program** jika tersedia. Pembatasan mount `noexec` tidak dapat dilewati launcher—salin seluruh paket ke penyimpanan lokal atau gunakan mount yang mengizinkan executable. Tidak ada autorun USB atau perubahan konfigurasi keamanan otomatis.
+
 ### Paket Windows klik-ganda
 
 Di mesin Windows build, jalankan `scripts/prepare.ps1 -Backend cpu -Package` dari PowerShell. Output `dist/AI-CHECKER-Windows-cpu.zip` berisi executable Windows x64, engine CPU dan DLL, model Qwen3-4B, SQLite baru tanpa report pribadi, JSON Token Atlas, konfigurasi, lisensi sumber yang tersedia, serta `START-WINDOWS.cmd`. SHA-256 ZIP disimpan di file pendamping. Packaging menolak menimpa staging/ZIP lama. ZIP64 dipakai untuk model >2 GB; Windows 10/11 x64 disarankan.

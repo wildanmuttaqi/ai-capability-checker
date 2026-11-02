@@ -16,6 +16,7 @@ find "$src/build-$backend" -name '*.so*' \( -type f -o -type l \) -exec cp -L '{
 cp "$src/LICENSE" engine/llama.cpp/LICENSE
 cargo build --release --locked
 cp target/release/ai-checker linux/ai-checker
+chmod +x START-LINUX.sh linux/ai-checker engine/llama.cpp/linux/llama-bench
 linux/ai-checker dataset-import dataset/token-atlas/records.json
 file=models/Qwen3-4B-Q4_K_M.gguf
 hash=7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5
