@@ -157,13 +157,15 @@ pub fn detect() -> Value {
             }
         }
     }
-    let mut npu = Vec::<String>::new();
     #[cfg(target_os = "linux")]
-    if let Ok(entries) = fs::read_dir("/sys/class/accel") {
-        for entry in entries.flatten() {
-            npu.push(entry.file_name().to_string_lossy().into_owned());
-        }
-    }
+    let npu: Vec<String> = fs::read_dir("/sys/class/accel")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    #[cfg(not(target_os = "linux"))]
+    let npu = Vec::<String>::new();
     let temp = std::env::temp_dir();
     let disks = Disks::new_with_refreshed_list();
     let free = disks
