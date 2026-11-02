@@ -279,6 +279,24 @@ fn rating(tps: f64) -> &'static str {
     }
 }
 
+fn hardware_assessment(h: &Value, b: &Value) -> Value {
+    let backend = b["backend"].as_str().unwrap_or("Unknown");
+    let cpu_active = backend == "CPU";
+    let gpu = h["gpu"].as_array().cloned().unwrap_or_default();
+    let npu = h["npu"].as_array().cloned().unwrap_or_default();
+    json!({
+        "cpu":{"name":h["cpu"],"cores":h["cores"],"threads":h["threads"],
+            "role":if cpu_active{"Benchmark 4B mengukur jalur CPU dan RAM secara nyata"}else{"CPU terdeteksi; kontribusi terpisah belum diukur"}},
+        "gpu":{"devices":gpu,"role":if cpu_active{"GPU tidak digunakan pada benchmark ini; hasil CPU tidak memprediksi performa GPU"}else{"Offload diminta; penggunaan GPU harus dikonfirmasi di log engine, bukan dari nama backend saja"}},
+        "vram":{"role":"Kapasitas driver bukan VRAM bebas. Full GPU offload memerlukan bobot + KV cache + buffer muat pada satu GPU; tidak menjumlahkan VRAM antar-GPU atau shared RAM. Kelayakan GPU belum terverifikasi tanpa pengukuran offload."},
+        "npu":{"devices":npu,"used_in_benchmark":false,
+            "role":"NPU tidak digunakan runner llama.cpp ini; keberadaan NPU/TOPS tidak menambah skor rekomendasi CPU/GPU"},
+        "ram":{"available_bytes":h["ram_available_bytes"],"role":"Batas kapasitas host, bukan pengukur kecepatan"},
+        "backend":backend,"generation_tps":b["generation_tps"],
+        "conclusion":"Kecepatan mengikuti hasil 4B pada backend aktif dan bukti pembanding yang cocok. Identitas CPU/GPU, jalur backend, VRAM dan RAM menentukan relevansi/kapasitas; perangkat yang hanya terdeteksi tidak dianggap sudah diuji."
+    })
+}
+
 pub fn recommend(
     db: &Connection,
     c: &Config,
@@ -407,6 +425,7 @@ pub fn recommend(
     let external_reference = atlas_reference(db, c)?;
     Ok(
         json!({"confidence":confidence,"comparable_benchmarks":machines.len(),"models":models,
+        "hardware_assessment":hardware_assessment(hardware,benchmark),
         "external_reference":external_reference,
         "notes":["No TOPS-based or linear parameter extrapolation. No comparable measurements means insufficient data, not a negative recommendation.",
         "Strict evidence: exact 4B hash, family/quant/backend/build/workload; anchor throughput ±20%, RAM ±25%. Atlas CPU evidence requires explicit CPU backend, Q4_K_M, Qwen3 names, compatible known workload; paired source/hardware/backend/settings or exact CPU label. Unknown metadata caps Atlas confidence at low. No GPU/Apple throughput substitution for CPU.",
@@ -418,6 +437,19 @@ pub fn recommend(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detected_accelerators_do_not_inflate_cpu_recommendation() {
+        let h = json!({"cpu":"test CPU","gpu":[{"name":"test GPU","vram_bytes":24u64*1_073_741_824}],"npu":["test NPU"]});
+        let a = hardware_assessment(&h, &json!({"backend":"CPU","generation_tps":3.0}));
+        assert_eq!(a["generation_tps"], 3.0);
+        assert_eq!(a["npu"]["used_in_benchmark"], false);
+        assert!(a["gpu"]["role"]
+            .as_str()
+            .unwrap()
+            .contains("tidak digunakan"));
+        assert_eq!(a["gpu"]["devices"][0]["vram_bytes"], 24u64 * 1_073_741_824);
+    }
 
     #[test]
     fn memory_and_atlas_filters_do_not_invent_speed() {
