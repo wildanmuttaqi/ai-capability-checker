@@ -287,7 +287,7 @@ fn hardware_assessment(h: &Value, b: &Value) -> Value {
     json!({
         "cpu":{"name":h["cpu"],"cores":h["cores"],"threads":h["threads"],
             "role":if cpu_active{"Benchmark 4B mengukur jalur CPU dan RAM secara nyata"}else{"CPU terdeteksi; kontribusi terpisah belum diukur"}},
-        "gpu":{"devices":gpu,"role":if cpu_active{"GPU tidak digunakan pada benchmark ini; hasil CPU tidak memprediksi performa GPU"}else{"Offload diminta; penggunaan GPU harus dikonfirmasi di log engine, bukan dari nama backend saja"}},
+        "gpu":{"devices":gpu,"role":if cpu_active{"GPU tidak digunakan pada benchmark ini; hasil CPU tidak memprediksi performa GPU"}else if backend == "NVIDIA CUDA" {"NVIDIA CUDA layer offload verified from engine stderr; CPU still participates"}else{"Offload unverified; GPU execution must not be assumed"}},
         "vram":{"role":"Kapasitas driver bukan VRAM bebas. Full GPU offload memerlukan bobot + KV cache + buffer muat pada satu GPU; tidak menjumlahkan VRAM antar-GPU atau shared RAM. Kelayakan GPU belum terverifikasi tanpa pengukuran offload."},
         "npu":{"devices":npu,"used_in_benchmark":false,
             "role":"NPU tidak digunakan runner llama.cpp ini; keberadaan NPU/TOPS tidak menambah skor rekomendasi CPU/GPU"},

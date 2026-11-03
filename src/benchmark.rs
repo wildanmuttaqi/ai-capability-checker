@@ -17,6 +17,97 @@ impl Drop for Lock {
     }
 }
 
+#[derive(serde::Serialize)]
+pub struct EngineSelection {
+    pub path: std::path::PathBuf,
+    pub cuda: bool,
+    pub warnings: Vec<String>,
+}
+
+pub fn select_engine(root: &Path, c: &Config, hardware: &Value, cpu: bool) -> EngineSelection {
+    let eligible = hardware["gpu"]
+        .as_array()
+        .is_some_and(|gpus| gpus.iter().any(|gpu| gpu["cuda_probe"] == true));
+    let bundled = c.cuda_engine(root).is_file();
+    let cuda = !cpu && c.gpu_layers != 0 && eligible && bundled;
+    let mut warnings = vec![];
+    if !cpu && c.gpu_layers != 0 {
+        if !bundled {
+            warnings.push("CUDA engine missing from bundle; using CPU baseline. Prepare a CUDA package to enable NVIDIA acceleration.".into());
+        }
+        if !eligible {
+            warnings.push("NVIDIA CUDA probe unavailable: nvidia-smi did not report a device. Using CPU baseline; inventory alone does not prove CUDA eligibility. No driver is installed by this app.".into());
+        }
+    }
+    EngineSelection {
+        path: if cuda {
+            c.cuda_engine(root)
+        } else {
+            c.engine(root)
+        },
+        cuda,
+        warnings,
+    }
+}
+
+// Compiled backend names and -ngl are not proof of execution on a GPU.
+fn offload_evidence(log: &str) -> Option<u32> {
+    log.lines()
+        .filter_map(|line| {
+            let (_, tail) = line.split_once(": offloaded ")?;
+            let (counts, _) = tail.split_once(" layers to GPU")?;
+            let (used, total) = counts.split_once('/')?;
+            let (used, total) = (used.parse::<u32>().ok()?, total.parse::<u32>().ok()?);
+            (total > 0 && used <= total).then_some(used)
+        })
+        .min()
+}
+
+fn provenance(measured: &mut Value, cuda: bool, log: &str) -> Option<String> {
+    let offloaded = offload_evidence(log);
+    let no_offload = measured["raw"].as_array().is_some_and(|rows| {
+        !rows.is_empty()
+            && rows
+                .iter()
+                .all(|row| row["n_gpu_layers"].as_i64() == Some(0))
+    });
+    let (backend, warning) = if !cuda || no_offload || offloaded == Some(0) {
+        (
+            "CPU",
+            cuda.then(|| {
+                "CUDA engine ran without GPU layer offload; result is CPU, not CUDA acceleration."
+                    .to_string()
+            }),
+        )
+    } else if offloaded.is_some_and(|n| n > 0) && log.contains("ggml_cuda_init: found ") {
+        ("NVIDIA CUDA", None)
+    } else {
+        ("Unverified (CUDA requested)", Some("CUDA layer offload could not be verified from engine stderr; GPU throughput must not be assumed. See results/engine-primary.log.".into()))
+    };
+    measured["backend"] = json!(backend);
+    measured["offloaded_layers"] = json!(offloaded);
+    warning
+}
+
+fn with_cpu_fallback(
+    primary: &EngineSelection,
+    baseline: &EngineSelection,
+    warnings: &mut Vec<String>,
+    invoke: impl Fn(&EngineSelection, &str) -> Result<Value>,
+) -> Result<Value> {
+    match invoke(primary, "primary") {
+        Ok(v) => Ok(v),
+        Err(e) if primary.cuda => {
+            warnings.push(format!(
+                "CUDA attempt failed: {e}. Retried using distinct CPU baseline {}.",
+                baseline.path.display()
+            ));
+            invoke(baseline, "cpu-fallback")
+        }
+        Err(e) => Err(e),
+    }
+}
+
 pub fn parse(bytes: &[u8], c: &Config, cpu: bool) -> Result<Value> {
     let rows: Vec<Value> =
         serde_json::from_slice(bytes).context("llama-bench did not return a JSON array")?;
@@ -64,17 +155,18 @@ pub fn parse(bytes: &[u8], c: &Config, cpu: bool) -> Result<Value> {
     if generation["build_commit"] != prompt["build_commit"] {
         bail!("Mixed engine versions in benchmark results");
     }
-    let layers = generation["n_gpu_layers"]
-        .as_i64()
-        .context("Missing offload configuration")?;
-    // ponytail: compiled backends do not prove offload; retain raw GPU metadata and label requested offload explicitly.
-    let backend = if cpu || layers == 0 || generation["backends"].as_str() == Some("CPU") {
-        "CPU".to_string()
+    for row in [generation, prompt] {
+        if row["n_gpu_layers"].as_i64().is_none() {
+            bail!("Missing offload configuration");
+        }
+        if cpu && row["n_gpu_layers"].as_i64() != Some(0) {
+            bail!("CPU baseline returned nonzero GPU layer configuration");
+        }
+    }
+    let backend = if cpu {
+        "CPU"
     } else {
-        format!(
-            "{} (offload requested; verify engine log)",
-            generation["backends"].as_str().unwrap_or("Unknown")
-        )
+        "Unverified (CUDA requested)"
     };
     Ok(
         json!({"generation_tps":generation["avg_ts"],"prompt_tps":prompt["avg_ts"],
@@ -192,16 +284,33 @@ pub fn run_with_progress(root: &Path, cpu: bool, progress: &dyn Fn(String)) -> R
     let _guard = Lock(lock_path);
     writeln!(lock, "{}", std::process::id())?;
     let c = Config::load(root)?;
-    let engine = c.engine(root);
-    if !engine.is_file() {
+    let baseline = select_engine(root, &c, &Value::Null, true);
+    // Legacy Linux layout is accepted only for CPU bundles, never as a CUDA fallback.
+    if baseline.path.parent().is_some_and(|parent| {
+        fs::read_dir(parent)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| {
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                name.contains("ggml-cuda")
+            })
+    }) {
+        bail!("CPU baseline directory contains CUDA libraries; rebuild with scripts/prepare.sh cpu or scripts/prepare.ps1 to isolate the engines");
+    }
+    if !baseline.path.is_file() {
         bail!(
             "llama-bench missing: {}. Run preparation script on a development machine.",
-            engine.display()
+            baseline.path.display()
         );
     }
     let source = root.join(&c.model_path);
     progress("Memeriksa hardware dan RAM sebelum menyalin model…".into());
     let hardware = detect();
+    let selected = select_engine(root, &c, &hardware, cpu);
+    for warning in &selected.warnings {
+        progress(warning.clone());
+    }
     let model_bytes = fs::metadata(&source).context("4B GGUF missing")?.len();
     let required = model_bytes + 1024 * 1024 * 1024;
     let available = hardware["ram_available_bytes"].as_u64().unwrap_or(0);
@@ -221,16 +330,20 @@ pub fn run_with_progress(root: &Path, cpu: bool, progress: &dyn Fn(String)) -> R
         c.threads
     };
     let started = Instant::now();
-    let invoke = |use_cpu: bool, suffix: &str| -> Result<Value> {
-        let log = File::create(root.join(format!("results/engine-{suffix}.log")))?;
+    let invoke = |selection: &EngineSelection, suffix: &str| -> Result<Value> {
+        let engine = &selection.path;
+        let use_cpu = !selection.cuda;
+        let log_path = root.join(format!("results/engine-{suffix}.log"));
+        let log = File::create(&log_path)?;
         progress(format!("Engine aktif ({}): memuat model dari TEMP → warmup → prompt {} token → generation {} token; {} pengulangan, prefill {} token. Tahap internal tidak dilaporkan engine; tunggu hasil, bukan persentase perkiraan.",if use_cpu{"CPU"}else{"backend otomatis"},c.prompt_tokens,c.generation_tokens,c.runs,c.context_depth));
-        let output = Command::new(&engine)
+        let output = Command::new(engine)
             .current_dir(engine.parent().context("Invalid engine path")?)
             .arg("-m")
             .arg(&model)
             .args([
                 "-o",
                 "json",
+                "--verbose",
                 "-p",
                 &c.prompt_tokens.to_string(),
                 "-n",
@@ -258,19 +371,26 @@ pub fn run_with_progress(root: &Path, cpu: bool, progress: &dyn Fn(String)) -> R
                 output.status
             );
         }
-        parse(&output.stdout, &c, use_cpu)
+        let mut measured = parse(&output.stdout, &c, use_cpu)?;
+        let log_text =
+            fs::read_to_string(&log_path).context("Cannot read engine offload evidence")?;
+        measured["backend_warning"] = json!(provenance(&mut measured, selection.cuda, &log_text));
+        measured["engine_path"] = json!(engine);
+        measured["engine_log"] = json!(format!("results/engine-{suffix}.log"));
+        measured["requested_backend"] = json!(if selection.cuda { "NVIDIA CUDA" } else { "CPU" });
+        Ok(measured)
     };
     let mut warnings = vec!["Synthetic llama-bench token workload; tokenization/sampling excluded. Context depth is prefilled KV, not a chat context limit.".to_string(),
         "Load time, TTFT and peak RAM/VRAM are not measured by this runner; reported as unknown, never inferred from throughput.".to_string()];
-    let mut measured = match invoke(cpu, "primary") {
-        Ok(v) => v,
-        Err(e) if !cpu && c.gpu_layers != 0 => {
-            progress("Percobaan GPU gagal; mengulang benchmark melalui CPU…".into());
-            warnings.push(format!("GPU attempt failed: {e}. Retried on CPU."));
-            invoke(true, "cpu-fallback")?
-        }
-        Err(e) => return Err(e),
-    };
+    warnings.extend(selected.warnings.clone());
+    warnings.push(
+        "NPU not supported by this llama.cpp runner; detected NPU hardware is not benchmarked."
+            .into(),
+    );
+    let mut measured = with_cpu_fallback(&selected, &baseline, &mut warnings, invoke)?;
+    if let Some(warning) = measured["backend_warning"].as_str() {
+        warnings.push(warning.to_string());
+    }
     measured["total_seconds"] = json!(started.elapsed().as_secs_f64());
     measured["model_preparation_seconds"] = json!(preparation_seconds);
     measured["model_storage"] = json!("OS TEMP/ai-checker-model-cache-v1; content-addressed cache, SHA-256 verified on every run; retained for reuse");
@@ -298,6 +418,95 @@ pub fn run_with_progress(root: &Path, cpu: bool, progress: &dyn Fn(String)) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn selects_distinct_engines_and_falls_back_to_baseline() {
+        let dir = std::env::temp_dir().join(format!(
+            "engine-selection-{}-{}",
+            std::process::id(),
+            stamp()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let _guard = TempModel(dir.clone());
+        let c: Config = serde_json::from_str(include_str!("../config/benchmark.json")).unwrap();
+        let nvidia = json!({"gpu":[{"name":"NVIDIA test", "cuda_probe":true}]});
+        let missing = select_engine(&dir, &c, &nvidia, false);
+        assert!(!missing.cuda);
+        assert!(missing.warnings.iter().any(|w| w.contains("missing")));
+        let cuda = c.cuda_engine(&dir);
+        fs::create_dir_all(cuda.parent().unwrap()).unwrap();
+        fs::write(&cuda, []).unwrap();
+        let baseline = select_engine(&dir, &c, &nvidia, true);
+        let primary = select_engine(&dir, &c, &nvidia, false);
+        assert!(primary.cuda);
+        assert_ne!(primary.path, baseline.path);
+        assert!(!baseline.cuda);
+        assert!(!select_engine(&dir, &c, &json!({"gpu":[]}), false).cuda);
+        assert!(
+            !select_engine(
+                &dir,
+                &c,
+                &json!({"gpu":[{"name":"NVIDIA inventory only"}]}),
+                false
+            )
+            .cuda
+        );
+        let mut disabled = c.clone();
+        disabled.gpu_layers = 0;
+        assert!(!select_engine(&dir, &disabled, &nvidia, false).cuda);
+        let calls = std::cell::RefCell::new(vec![]);
+        let mut warnings = vec![];
+        let result = with_cpu_fallback(&primary, &baseline, &mut warnings, |selection, suffix| {
+            calls
+                .borrow_mut()
+                .push((selection.path.clone(), suffix.to_string()));
+            if selection.cuda {
+                bail!("simulated missing CUDA DLL")
+            }
+            Ok(json!({"backend":"CPU", "engine_path":selection.path}))
+        })
+        .unwrap();
+        assert_eq!(result["backend"], "CPU");
+        assert_eq!(result["engine_path"], json!(baseline.path));
+        assert_eq!(
+            calls.borrow().as_slice(),
+            &[
+                (cuda, "primary".into()),
+                (baseline.path.clone(), "cpu-fallback".into())
+            ]
+        );
+        assert!(warnings[0].contains("distinct CPU baseline"));
+        assert!(
+            with_cpu_fallback(&baseline, &baseline, &mut vec![], |_, _| bail!(
+                "CPU failure"
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn cuda_label_requires_actual_offload_evidence() {
+        let log = "ggml_cuda_init: found 1 CUDA devices:\nllama_model_load: offloaded 37/37 layers to GPU\n";
+        let mut measured = json!({"raw":[{"n_gpu_layers":99,"backends":"CUDA"}]});
+        assert!(provenance(&mut measured, true, log).is_none());
+        assert_eq!(measured["backend"], "NVIDIA CUDA");
+        assert_eq!(measured["offloaded_layers"], 37);
+        assert!(provenance(&mut measured, true, "").is_some());
+        assert_eq!(measured["backend"], "Unverified (CUDA requested)");
+        assert!(provenance(
+            &mut measured,
+            true,
+            "llama_model_load: offloaded 0/37 layers to GPU"
+        )
+        .is_some());
+        assert_eq!(measured["backend"], "CPU");
+        measured["raw"][0]["n_gpu_layers"] = json!(0);
+        assert!(provenance(&mut measured, true, "").is_some());
+        assert_eq!(measured["backend"], "CPU");
+        assert!(provenance(&mut measured, false, log).is_none());
+        assert_eq!(measured["backend"], "CPU");
+        assert_eq!(offload_evidence("offloaded bananas/37 layers to GPU"), None);
+    }
+
     #[test]
     fn cache_reuses_valid_copy_and_repairs_corruption() {
         let dir =

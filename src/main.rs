@@ -89,14 +89,36 @@ impl Config {
         Ok(c)
     }
     pub fn engine(&self, root: &Path) -> PathBuf {
-        root.join(
+        let legacy = root.join(
             self.engine_path
                 .replace(
                     "{platform}",
                     if cfg!(windows) { "windows" } else { "linux" },
                 )
                 .replace("{exe}", if cfg!(windows) { ".exe" } else { "" }),
-        )
+        );
+        let baseline = legacy
+            .parent()
+            .unwrap()
+            .join("cpu")
+            .join(legacy.file_name().unwrap());
+        // Existing Linux CPU bundles remain usable; new Windows bundles require a distinct baseline.
+        if cfg!(windows) || baseline.is_file() {
+            baseline
+        } else {
+            legacy
+        }
+    }
+
+    pub fn cuda_engine(&self, root: &Path) -> PathBuf {
+        root.join("engine/llama.cpp")
+            .join(if cfg!(windows) { "windows" } else { "linux" })
+            .join("cuda")
+            .join(if cfg!(windows) {
+                "llama-bench.exe"
+            } else {
+                "llama-bench"
+            })
     }
 }
 
@@ -118,7 +140,7 @@ pub fn detect() -> Value {
             for line in String::from_utf8_lossy(&o.stdout).lines() {
                 let p: Vec<_> = line.split(',').map(str::trim).collect();
                 if p.len() == 3 {
-                    gpu.push(json!({"name":p[0],"vram_bytes":p[1].parse::<u64>().ok().map(|n|n*1024*1024),"driver":p[2]}));
+                    gpu.push(json!({"name":p[0],"vram_bytes":p[1].parse::<u64>().ok().and_then(|n|n.checked_mul(1024*1024)),"driver":p[2],"cuda_probe":true}));
                 }
             }
         }
@@ -191,7 +213,7 @@ pub fn detect() -> Value {
     json!({"cpu":cpu.map(|c|c.brand()),"vendor":cpu.map(|c|c.vendor_id()),"cores":s.physical_core_count(),
         "threads":s.cpus().len(),"frequency_mhz":cpu.map(|c|c.frequency()),"architecture":std::env::consts::ARCH,
         "os":System::long_os_version(),"ram_total_bytes":s.total_memory(),"ram_available_bytes":s.available_memory(),
-        "gpu":gpu,"npu":npu,"npu_status":if npu.is_empty(){"Tidak terdeteksi; perangkat mungkin tidak tersedia atau driver belum mengeksposnya"}else{"Terdeteksi oleh OS; dukungan benchmark belum diverifikasi"},"tops":null,"temp_dir":temp,"free_storage_bytes":free,
+        "gpu":gpu,"npu":npu,"npu_status":"Not supported by this llama.cpp runner (even if detected); no NPU benchmark is available", "tops":null,"temp_dir":temp,"free_storage_bytes":free,
         "notes":["TOPS unknown: no reliable OS measurement. NPU discovery does not imply llama.cpp support.","GPU enumeration is best-effort; backend availability is verified by running the engine."]})
 }
 

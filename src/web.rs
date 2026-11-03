@@ -58,8 +58,9 @@ pub fn serve(root: PathBuf, port: u16) -> Result<()> {
                     [],
                     |r| r.get(0),
                 )?;
-                Ok((json!({"hardware":hardware,"config":config,
-                        "readiness":{"model":root.join(&config.model_path).is_file(),"engine":config.engine(&root).is_file(),"dataset_records":count},
+                let selection = benchmark::select_engine(&root, &config, &hardware, false);
+                Ok((json!({"hardware":hardware,"config":config,"backend_selection":selection,
+                    "readiness":{"model":root.join(&config.model_path).is_file(),"engine":config.engine(&root).is_file(),"cuda_engine":config.cuda_engine(&root).is_file(),"dataset_records":count},
                         "job":job.lock().map_err(|_|anyhow!("Job lock poisoned"))?.clone(),"report":latest(&root).ok()}).to_string(),"application/json"))
             }
             (&Method::Post, "/api/detect") => {

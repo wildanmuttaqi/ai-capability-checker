@@ -1,6 +1,14 @@
 name: Windows portable USB
 on:
   workflow_dispatch:
+    inputs:
+      accelerator:
+        description: 'CUDA + CPU fallback (default), or explicit CPU-only package'
+        type: choice
+        default: cuda
+        options:
+          - cuda
+          - cpu
 
 permissions:
   contents: read
@@ -8,12 +16,20 @@ permissions:
 jobs:
   package:
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # Tag v0.2.24 resolved via GitHub API; pinned source, NVIDIA-hosted installer.
+      - name: Install build-host CUDA toolkit (not a target driver)
+        if: inputs.accelerator == 'cuda'
+        uses: Jimver/cuda-toolkit@c35baa1a18fd1fc9dcf47c5bd839bf30559c0bc3
+        with:
+          cuda: '12.6.3'
+          method: network
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "visual_studio_integration"]'
       - name: Check Rust
         run: |
           cargo fmt --check
@@ -21,17 +37,21 @@ jobs:
           cargo test --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/check-ui.cjs
           exit $LASTEXITCODE
       - name: Build engine, download verified model, package USB
         shell: pwsh
-        run: ./scripts/prepare.ps1 -Backend cpu -Package
+        env:
+          CHECKER_ACCELERATOR: ${{ inputs.accelerator }}
+        run: ./scripts/prepare.ps1 -Backend $env:CHECKER_ACCELERATOR -Package
       - name: Upload complete offline Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: AI-CHECKER-Windows-CPU
+          name: AI-CHECKER-Windows-${{ inputs.accelerator }}
           path: |
-            dist/AI-CHECKER-Windows-cpu.zip
-            dist/AI-CHECKER-Windows-cpu.zip.sha256
+            dist/AI-CHECKER-Windows-${{ inputs.accelerator }}.zip
+            dist/AI-CHECKER-Windows-${{ inputs.accelerator }}.zip.sha256
           compression-level: 0
           retention-days: 7
           if-no-files-found: error
